@@ -7482,12 +7482,10 @@
                         return;
                     }
                     
-            // Get server URL (with IP address for network access)
-            // For QR code: always use IP address and port 3000 with ?slave=true
-            // WebSocket is now on the same port (3000), so slaves can connect
-            // Slaves will use the IP from the URL they access, so this should be the server's IP
-            const qrBaseUrl = 'http://192.168.2.34:3000';
-                    const serverUrl = isSlave ? qrBaseUrl : `${qrBaseUrl}?slave=true`;
+            // Get server URL - use current page URL for Railway/production
+            // For QR code: use the current page's origin (works for both localhost and Railway)
+            const qrBaseUrl = window.location.origin;
+                    const serverUrl = `${qrBaseUrl}?slave=true`;
                     console.log('QR Code URL generated:', serverUrl);
                     
                     // Get container dimensions
