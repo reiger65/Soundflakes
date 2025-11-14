@@ -1696,7 +1696,9 @@
                     if (useWarmSynth) {
                         // Use warm synth engine for organic, meditative sounds
                         console.log('🎹 Using warm synth engine for preset:', currentPresetName.value);
-                        const velocity = effectiveVolume * 0.3; // Standardized gain for all sounds
+                        // Increase volume for all sounds except Original Sine
+                        // Original Sine uses 0.15 multiplier (line 1758), other sounds use higher multiplier
+                        const velocity = effectiveVolume * 0.6; // Increased from 0.3 to 0.6 for louder non-sine sounds
                         const voice = new WarmSynthVoice(audioContext, currentPreset, freq, velocity, finalDuration, masterGain);
                         
                         // Store voice for tracking (compatible with oscillator structure)
@@ -7484,6 +7486,7 @@
                     
             // Get server URL - use current page URL for Railway/production
             // For QR code: use the current page's origin (works for both localhost and Railway)
+            // This automatically adapts to domain changes (localhost, Railway, custom domains)
             const qrBaseUrl = window.location.origin;
                     const serverUrl = `${qrBaseUrl}?slave=true`;
                     console.log('QR Code URL generated:', serverUrl);
@@ -7495,10 +7498,15 @@
                         return;
                     }
                     
-                    // Check if QR code already exists and matches the URL
+                    // Check if QR code already exists - if URL changed (domain changed), regenerate it
                     const existingQR = container.querySelector('canvas');
                     if (existingQR && existingQR.dataset.qrUrl === serverUrl) {
-                        return; // QR code already exists and matches, don't regenerate
+                        return; // QR code already exists and matches current domain, don't regenerate
+                    }
+                    // If existing QR has different URL (domain changed), clear it to regenerate with new domain
+                    if (existingQR && existingQR.dataset.qrUrl !== serverUrl) {
+                        console.log('Domain changed, regenerating QR code. Old:', existingQR.dataset.qrUrl, 'New:', serverUrl);
+                        container.innerHTML = '';
                     }
                     
                     const containerWidth = container.clientWidth || 200;
