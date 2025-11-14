@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html>
+<head><title>WebSocket Test</title></head>
+<body>
+<h1>WebSocket Connection Test</h1>
+<div id="status">Connecting...</div>
+<script>
+const ws = new WebSocket('ws://192.168.2.34:8001');
+ws.onopen = () => {
+    document.getElementById('status').textContent = 'Connected!';
+    ws.send(JSON.stringify({type: 'test'}));
+};
+ws.onerror = (e) => {
+    document.getElementById('status').textContent = 'Error: ' + e;
+};
+ws.onclose = (e) => {
+    document.getElementById('status').textContent = 'Closed: code=' + e.code + ', reason=' + e.reason;
+};
+</script>
+</body>
+</html>
