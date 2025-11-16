@@ -249,12 +249,9 @@ wss.on('connection', (ws, req) => {
         console.log('WebSocket closed from', clientIP, 'code:', code, 'reason:', reasonStr);
         console.log('Was clean close:', code === 1000);
         
-        // Check if this was a slave
         const wasSlave = slaves.find(s => s.ws === ws);
         if (wasSlave) {
-            console.log('Slave disconnected:', wasSlave.id);
-            slaves = slaves.filter(s => s.ws !== ws);
-            console.log('Remaining slaves:', slaves.length);
+            console.log('Slave disconnected (pending removal):', wasSlave.id);
         }
     });
     
@@ -289,7 +286,7 @@ wss.on('connection', (ws, req) => {
                 
                 const slaveNumber = slaves.length + 1; // We haven't pushed the new slave yet
                 const slaveName = String(slaveNumber);
-                slaves.push({ id: slaveId, ws, connected: true, volume: 100, name: slaveName }); // Default volume 100%
+                slaves.push({ id: slaveId, ws, connected: true, volume: 50, name: slaveName }); // Default volume 50%
                 const slaveIndex = slaveNumber; // Slave number (1-based)
                 console.log(`✓ Slave registered successfully: ${slaveId} (Total: ${slaves.length}, Number: ${slaveIndex})`);
                 
@@ -463,15 +460,20 @@ wss.on('connection', (ws, req) => {
             masterIsPlaying = false; // Reset playing state when master disconnects
             console.log('Master disconnected');
         } else {
-            slaves = slaves.filter(s => s.ws !== ws);
-            console.log(`Slave disconnected (Total: ${slaves.length})`);
-            
-            // Notify master if it exists
-            if (masterConnection) {
-                masterConnection.send(JSON.stringify({
-                    type: 'slave_disconnected',
-                    totalSlaves: slaves.length
-                }));
+            const removedSlave = slaves.find(s => s.ws === ws);
+            if (removedSlave) {
+                slaves = slaves.filter(s => s.ws !== ws);
+                console.log(`Slave disconnected (${removedSlave.id}) (Total: ${slaves.length})`);
+                
+                // Notify master if it exists
+                if (masterConnection) {
+                    masterConnection.send(JSON.stringify({
+                        type: 'slave_disconnected',
+                        slaveId: removedSlave.id,
+                        slaveName: removedSlave.name,
+                        totalSlaves: slaves.length
+                    }));
+                }
             }
         }
     });

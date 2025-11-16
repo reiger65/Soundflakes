@@ -1006,12 +1006,12 @@
                 const settings = reactive({ noteLength: 5, pauseLength: 5, masterVolume: 70, vizMode: 'rotate', numGenerators: 3, masterMuted: false, masterIncluded: true, referencePitch: 440 });
                 const masterAssignedNotes = ref([]); // Notes assigned to master
                 const masterCurrentlyPlayingNote = ref(null); // Currently playing note on master
-                const masterVolume = ref(100); // Master volume when included (separate from masterVolume setting)
+                const masterVolume = ref(50); // Master volume when included (separate from masterVolume setting)
                 const masterSliderRef = ref(null); // Ref to master slider element
                 const totalSlaves = ref(0); // Track total number of connected slaves (for master)
                 const connectedSlaves = reactive([]); // Track individual slaves with their IDs, names, and volumes
                 const slaveName = ref(null); // Slave's own name (for slave devices)
-                const slaveVolume = ref(100); // Per-slave volume (for slave devices, default 100%)
+                const slaveVolume = ref(50); // Per-slave volume (for slave devices, default 50%)
                 const slaveCurrentlyPlayingNote = ref(null); // Currently playing note on slave (for animation)
                 
                 // Computed property to display slaves including master when included
@@ -1659,13 +1659,13 @@
                         droneOscillator.frequency.value = 18;
                         droneOscillator.type = 'sine';
                         
-                        // Reduced intensity - still inaudible but more "active" for iOS
-                        // 0.00025 is half the previous value, still completely inaudible
-                        droneGain.gain.value = 0.00025;
+                        // Keep drone extremely quiet and bypass master chain (connect directly to destination)
+                        const baseDroneGain = 0.00005;
+                        droneGain.gain.value = baseDroneGain;
                         
-                        // Connect: oscillator -> gain -> masterGain -> destination
+                        // Connect: oscillator -> gain -> destination
                         droneOscillator.connect(droneGain);
-                        droneGain.connect(masterGain);
+                        droneGain.connect(audioContext.destination);
                         
                         // Start and let it run continuously
                         droneOscillator.start();
@@ -1691,8 +1691,6 @@
                                 const droneP = cachedDroneParticle || particles.find(p => p.isDrone);
                                 if (droneP) {
                                     cachedDroneParticle = droneP; // Update cache
-                                    // Pulse phase is updated in the animate loop for smooth animation
-                                    // Just ensure it exists
                                     if (!droneP.pulsePhase) droneP.pulsePhase = 0;
                                 }
                             }
@@ -1700,7 +1698,6 @@
                         const droneVisualInterval = setInterval(() => {
                             if (!droneOscillator) {
                                 clearInterval(droneVisualInterval);
-                                // Remove drone particle
                                 const index = particles.findIndex(p => p.isDrone);
                                 if (index >= 0) {
                                     particles.splice(index, 1);
@@ -1886,11 +1883,16 @@
                     // Get current sound preset
                     const currentPreset = synthPresets.find(p => p.name === currentPresetName.value) || synthPresets[0];
                     const useWarmSynth = currentPreset.type === 'warm';
+                    const isOriginalSine = currentPreset.name === 'Original Sine';
+                    const volumeMultiplier = isOriginalSine ? 1 : 2;
+                    const adjustedVolume = Math.min(1, effectiveVolume * volumeMultiplier);
                     
                     if (noteName) {
                         const releaseTail = useWarmSynth ? Math.max(currentPreset.release || 0, 0) : 0.25;
-                        const randomVariation = Math.random() * 1.2; // up to +1.2s extra for longer notes
-                        const highlightExtraTail = useWarmSynth ? 2 : 0.4;
+                        const randomVariation = Math.random() * (highlightIsSlave ? 1.2 : 1.8); // give masters slightly more cushion
+                        const highlightExtraTail = useWarmSynth
+                            ? (highlightIsSlave ? 2 : 3.8)
+                            : (highlightIsSlave ? 0.4 : 1.2);
                         const highlightDurationSeconds = finalDuration + releaseTail + highlightExtraTail + randomVariation;
                         highlightTimeoutMs = Math.max(highlightDurationSeconds * 1000, (finalDuration + 0.1) * 1000);
                     }
@@ -1925,7 +1927,7 @@
                         debugLog('🎹 Using warm synth engine for preset:', currentPresetName.value);
                         // Increase volume for all sounds except Original Sine
                         // Original Sine uses 0.15 multiplier (line 1758), other sounds use higher multiplier
-                        const velocity = effectiveVolume * 0.6; // Increased from 0.3 to 0.6 for louder non-sine sounds
+                        const velocity = adjustedVolume * 0.6; // Increased from 0.3 to 0.6 for louder non-sine sounds
                         const voice = new WarmSynthVoice(audioContext, currentPreset, freq, velocity, finalDuration, masterGain);
                         
                         // Store voice for tracking (compatible with oscillator structure)
@@ -1985,9 +1987,9 @@
                     const fadeEndTime = now + finalDuration - 0.01; // Fade completes 10ms before stop
                     
                     oscGain.gain.setValueAtTime(0, now);
-                    oscGain.gain.linearRampToValueAtTime(effectiveVolume * 0.15, now + 0.1); // Lower gain for Original Sine to match other sounds
+                    oscGain.gain.linearRampToValueAtTime(adjustedVolume * 0.15, now + 0.1); // Lower gain for Original Sine to match other sounds
                     // Hold full volume until fade starts
-                    oscGain.gain.setValueAtTime(effectiveVolume * 0.15, fadeStartTime);
+                    oscGain.gain.setValueAtTime(adjustedVolume * 0.15, fadeStartTime);
                     // Fade out smoothly
                     oscGain.gain.linearRampToValueAtTime(0, fadeEndTime);
                     
@@ -6597,7 +6599,9 @@
                                     // Both are percentages, so: (slaveVolume / 100) * (masterVolume / 100)
                                     const masterVolumePercent = settings.masterVolume || 70; // Default to 70% if not set
                                     const slaveVolumePercent = slaveVolume.value;
-                                    const targetGain = (slaveVolumePercent / 100) * (masterVolumePercent / 100);
+                                    const isOriginalSinePreset = currentPresetName.value === 'Original Sine';
+                                    const volumeMultiplier = isOriginalSinePreset ? 1 : 2;
+                                    const targetGain = (slaveVolumePercent / 100) * (masterVolumePercent / 100) * volumeMultiplier;
                                     const now = audioContext.currentTime;
                                     
                                     // Get current gain value, accounting for any scheduled changes
@@ -6784,7 +6788,7 @@
                                                 connectedSlaves.push({
                                                     id: slaveId,
                                                     name: slaveName || String(connectedSlaves.length + 1), // Use name if provided, otherwise use index
-                                                    volume: existingSettings?.volume !== undefined ? existingSettings.volume : 100, // Preserve volume or default to 100
+                                                    volume: existingSettings?.volume !== undefined ? existingSettings.volume : 50, // Preserve volume or default to 50
                                                     assignedNotes: assignedNotes, // Use server's notes, existing, or pending
                                                     currentlyPlayingNote: existingSettings?.currentlyPlayingNote || null // Preserve currently playing note
                                                 });
@@ -6976,35 +6980,8 @@
                                         console.warn(`  ⚠️ Slave "${data.slaveId}" not found in connectedSlaves for note_playing`);
                                         console.warn(`  Available slave IDs:`, connectedSlaves.map(s => `"${s.id}"`));
                                         
-                                        // Add unknown slave to list (it might have reconnected with new ID)
-                                        // This handles the case where slave_connected event was missed or delayed
-                                        console.log(`  📥 Adding unknown slave ${data.slaveId} to connectedSlaves`);
-                                        connectedSlaves.push({
-                                            id: data.slaveId,
-                                            name: String(connectedSlaves.length + 1), // Assign next number
-                                            volume: 100, // Default volume
-                                            assignedNotes: [], // Will be populated by next notes_assigned
-                                            currentlyPlayingNote: data.note
-                                        });
-                                        console.log(`  ✓ Added slave ${data.slaveId} to list (now ${connectedSlaves.length} slaves)`);
-                                        
-                                        // Request fresh slave list from server to ensure sync
-                                        if (ws.value && ws.value.readyState === WebSocket.OPEN) {
-                                            console.log(`  📤 Requesting fresh slave list from server...`);
-                                            // The server will send 'slaves' list when master connects, but we can trigger it
-                                            // by sending a message that causes server to respond with current state
-                                            // Actually, just wait for next slave_connected/disconnected event or request preset
-                                            sendPresetToSlaves(); // This will also sync the list via server response
-                                        }
-                                        
-                                        // Clear currently playing note after note duration
-                                        setTimeout(() => {
-                                            const addedSlave = connectedSlaves.find(s => s.id === data.slaveId);
-                                            if (addedSlave && addedSlave.currentlyPlayingNote === data.note) {
-                                                addedSlave.currentlyPlayingNote = null;
-                                                console.log(`  ✓ Cleared playing note for added slave ${data.slaveId}`);
-                                            }
-                                        }, (settings.noteLength * 1000) + 100);
+                                        console.warn(`  ⚠️ Unknown slave ${data.slaveId} reported note ${data.note}. Ignoring to prevent phantom entries.`);
+                                        return;
                                     }
                                 } else if (data.type === 'slave_connected' || data.type === 'slave_disconnected') {
                                     // Always send preset to slaves when they connect/disconnect
@@ -7040,7 +7017,7 @@
                                             connectedSlaves.push({
                                                 id: data.slaveId,
                                                 name: data.slaveName || String(connectedSlaves.length + 1), // Use name from server if provided
-                                                volume: 100, // Default volume
+                                                volume: 50, // Default volume
                                                 assignedNotes: [] // Initialize empty notes array
                                             });
                                             console.log(`  ✓ Added new slave ${data.slaveId} to connectedSlaves`);
