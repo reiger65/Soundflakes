@@ -266,7 +266,7 @@
         </div>
         
         <!-- Full-screen tap prompt for iOS - Show immediately when slave connects, before notes assigned -->
-        <div v-if="isSlave && (!audioUnlocked() || (audioContext() && audioContext().state === 'suspended'))" 
+        <div v-if="isSlave && !audioReady" 
              class="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-90"
              @touchstart.prevent.stop="handleTapToStart"
              @touchend.prevent.stop="handleTapToStart"
@@ -365,7 +365,7 @@
                 <div v-if="!isSlave && (connectedSlaves.length > 0 || settings.masterIncluded)" class="mb-4 px-2 py-2 apple-input rounded-lg">
                     <div class="text-gray-300 text-sm font-medium mb-3 flex items-center justify-between">
                         <span>Sound Flakes Volumes</span>
-                        <span class="text-gray-300 text-xs opacity-60">{{ displaySlaves.length }} connected</span>
+                        <span class="text-gray-300 text-xs opacity-60">{{ connectedSlaves.length }} connected</span>
                     </div>
                     
                     <!-- Master Flake - rendered separately with stable key to prevent slider jumping -->
@@ -677,6 +677,18 @@
     <script>
         const { createApp, ref, reactive, computed, onMounted, onUnmounted, watch } = Vue;
         
+        let enableVerboseLogs = false;
+        try {
+            enableVerboseLogs = typeof window !== 'undefined' && window.localStorage?.getItem?.('soundflakes-debug') === 'true';
+        } catch (e) {
+            enableVerboseLogs = false;
+        }
+        const debugLog = (...args) => {
+            if (enableVerboseLogs) {
+                console.log(...args);
+            }
+        };
+        
         // Intro Animation System
         (function() {
             const introOverlay = document.getElementById('intro-overlay');
@@ -933,6 +945,9 @@
                 const showQRCode = ref(false); // Show/hide QR code in fullscreen
                 const isFullscreen = ref(false); // Track fullscreen state
                 const showSleepPreventionTip = ref(false); // Show sleep prevention tip
+                let isPageVisible = true; // Track page visibility for rendering throttling
+                
+                const audioReady = ref(false);
                 
                 // Detect iOS device
                 const isIOSDevice = /iPad|iPhone|iPod/.test(navigator.userAgent) || 
@@ -958,15 +973,15 @@
                 
                 // Method to open menu
                 const openMenu = (e) => {
-                    console.log('openMenu called, event:', e);
-                    console.log('current showControls:', showControls.value);
-                    console.log('current isSlave:', isSlave);
+                    debugLog('openMenu called, event:', e);
+                    debugLog('current showControls:', showControls.value);
+                    debugLog('current isSlave:', isSlave);
                     if (e) {
                         e.preventDefault();
                         e.stopPropagation();
                     }
                     showControls.value = true;
-                    console.log('showControls set to:', showControls.value);
+                    debugLog('showControls set to:', showControls.value);
                 };
                 
                 // Method to close menu
@@ -975,9 +990,9 @@
                         e.preventDefault();
                         e.stopPropagation();
                     }
-                    console.log('closeMenu called, current showControls:', showControls.value);
+                    debugLog('closeMenu called, current showControls:', showControls.value);
                     showControls.value = false;
-                    console.log('showControls set to:', showControls.value);
+                    debugLog('showControls set to:', showControls.value);
                 };
                 
                 // Method to toggle menu (for backwards compatibility)
@@ -1070,6 +1085,8 @@
                 // Track previous master volume for scaling calculations
                 let previousMasterVolume = masterVolume.value;
                 let masterVolumeLocked = false; // Lock to prevent resets
+                let masterHighlightVersion = 0;
+                let slaveHighlightVersion = 0;
                 
                 // Watch masterVolume to detect unauthorized resets
                 watch(masterVolume, (newVal, oldVal) => {
@@ -1789,30 +1806,23 @@
                 };
                 
                 const playNote = (freq, volume, color, durationOverride = null, noteName = null, generatorId = null) => {
-                    console.log('playNote called:', { freq, volume, color, isSlave, durationOverride, noteName, generatorId });
+                    debugLog('playNote called:', { freq, volume, color, isSlave, durationOverride, noteName, generatorId });
+                    let highlightTimeoutMs = 0;
                     
-                    // Update currently playing note for master when included
+                    // Track currently playing note so UI can highlight it
+                    let highlightVersion = null;
+                    const highlightIsSlave = isSlave;
+                    
                     if (!isSlave && settings.masterIncluded && noteName) {
+                        masterHighlightVersion += 1;
+                        highlightVersion = masterHighlightVersion;
                         masterCurrentlyPlayingNote.value = noteName;
-                        // Clear after note duration
-                        const duration = durationOverride !== null ? durationOverride : (settings.noteLength + (Math.random() * 4 - 2));
-                        setTimeout(() => {
-                            if (masterCurrentlyPlayingNote.value === noteName) {
-                                masterCurrentlyPlayingNote.value = null;
-                            }
-                        }, duration * 1000 + 100);
                     }
                     
-                    // Update currently playing note for slaves (for animation)
                     if (isSlave && noteName) {
+                        slaveHighlightVersion += 1;
+                        highlightVersion = slaveHighlightVersion;
                         slaveCurrentlyPlayingNote.value = noteName;
-                        // Clear after note duration
-                        const duration = durationOverride !== null ? durationOverride : (settings.noteLength + (Math.random() * 4 - 2));
-                        setTimeout(() => {
-                            if (slaveCurrentlyPlayingNote.value === noteName) {
-                                slaveCurrentlyPlayingNote.value = null;
-                            }
-                        }, duration * 1000 + 100);
                     }
                     
                     // Master never shows visuals - only slaves do
@@ -1841,19 +1851,19 @@
                             startTime: Date.now() // Track when particle was created
                         };
                         particles.push(particle);
-                        console.log('Particle created with frequency:', freq, 'Hz for note:', noteName, 'duration:', duration, 's');
+                        debugLog('Particle created with frequency:', freq, 'Hz for note:', noteName, 'duration:', duration, 's');
                     }
                     
                     // Check if we should play sound
                     if (!masterGain || !audioContext) {
-                        console.log('playNote: audio context or masterGain not ready, visuals only');
-                        console.log('masterGain:', !!masterGain, 'audioContext:', !!audioContext);
+                        debugLog('playNote: audio context or masterGain not ready, visuals only');
+                        debugLog('masterGain:', !!masterGain, 'audioContext:', !!audioContext);
                         return;
                     }
                     
                     // If master is muted, don't play sound (but visuals already created above)
                     if (!isSlave && settings.masterMuted) {
-                        console.log('Master muted - visuals only, no sound');
+                        debugLog('Master muted - visuals only, no sound');
                         return;
                     }
                     
@@ -1864,7 +1874,7 @@
                     // Ensure minimum duration of 0.5 seconds to prevent very short notes
                     const finalDuration = Math.max(0.5, duration);
                     
-                    console.log('playNote: durationOverride=', durationOverride, 'calculated duration=', duration, 'finalDuration=', finalDuration);
+                    debugLog('playNote: durationOverride=', durationOverride, 'calculated duration=', duration, 'finalDuration=', finalDuration);
                     
                     // Apply master flake volume when master is included (separate from master volume knob)
                     let effectiveVolume = volume / 100;
@@ -1877,14 +1887,42 @@
                     const currentPreset = synthPresets.find(p => p.name === currentPresetName.value) || synthPresets[0];
                     const useWarmSynth = currentPreset.type === 'warm';
                     
+                    if (noteName) {
+                        const releaseTail = useWarmSynth ? Math.max(currentPreset.release || 0, 0) : 0.25;
+                        const randomVariation = Math.random() * 1.2; // up to +1.2s extra for longer notes
+                        const highlightExtraTail = useWarmSynth ? 2 : 0.4;
+                        const highlightDurationSeconds = finalDuration + releaseTail + highlightExtraTail + randomVariation;
+                        highlightTimeoutMs = Math.max(highlightDurationSeconds * 1000, (finalDuration + 0.1) * 1000);
+                    }
+                    
+                    const scheduleHighlightClear = () => {
+                        if (!noteName || highlightTimeoutMs <= 0 || highlightVersion === null) {
+                            return;
+                        }
+                        setTimeout(() => {
+                            if (!highlightIsSlave) {
+                                if (!settings.masterIncluded) {
+                                    return;
+                                }
+                                if (masterHighlightVersion === highlightVersion && masterCurrentlyPlayingNote.value === noteName) {
+                                    masterCurrentlyPlayingNote.value = null;
+                                }
+                            } else {
+                                if (slaveHighlightVersion === highlightVersion && slaveCurrentlyPlayingNote.value === noteName) {
+                                    slaveCurrentlyPlayingNote.value = null;
+                                }
+                            }
+                        }, highlightTimeoutMs);
+                    };
+                    
                     // Debug logging for sound preset usage
                     if (isSlave) {
-                        console.log('🎵 Slave playNote - currentPresetName:', currentPresetName.value, 'preset type:', currentPreset.type, 'useWarmSynth:', useWarmSynth);
+                        debugLog('🎵 Slave playNote - currentPresetName:', currentPresetName.value, 'preset type:', currentPreset.type, 'useWarmSynth:', useWarmSynth);
                     }
                     
                     if (useWarmSynth) {
                         // Use warm synth engine for organic, meditative sounds
-                        console.log('🎹 Using warm synth engine for preset:', currentPresetName.value);
+                        debugLog('🎹 Using warm synth engine for preset:', currentPresetName.value);
                         // Increase volume for all sounds except Original Sine
                         // Original Sine uses 0.15 multiplier (line 1758), other sounds use higher multiplier
                         const velocity = effectiveVolume * 0.6; // Increased from 0.3 to 0.6 for louder non-sine sounds
@@ -1927,6 +1965,7 @@
                             }
                         }, (finalDuration + (currentPreset.release || 1.5)) * 1000);
                         
+                        scheduleHighlightClear();
                         return;
                     }
                     
@@ -1982,7 +2021,7 @@
                         }
                         // Add actual oscillator
                         generatorOscillators[generatorId].add(osc);
-                        console.log('Generator', generatorId, ': added oscillator, total active:', generatorOscillators[generatorId].size);
+                        debugLog('Generator', generatorId, ': added oscillator, total active:', generatorOscillators[generatorId].size);
                     }
                     osc.onended = () => {
                         // Clean up when oscillator finishes naturally
@@ -1995,9 +2034,9 @@
                                 // Clear note end time when oscillator ends (only if no oscillators remain)
                                 if (remaining === 0) {
                                     generatorNoteEndTimes[generatorId] = null;
-                                    console.log('Generator', generatorId, ': oscillator ended, cleared note end time, remaining:', remaining);
+                                    debugLog('Generator', generatorId, ': oscillator ended, cleared note end time, remaining:', remaining);
                                 } else {
-                                    console.log('Generator', generatorId, ': oscillator ended, remaining:', remaining);
+                                    debugLog('Generator', generatorId, ': oscillator ended, remaining:', remaining);
                                 }
                             }
                         }
@@ -2015,15 +2054,16 @@
                     osc.start(now);
                     const stopTime = now + finalDuration;
                     osc.stop(stopTime); // Oscillator stops after full duration
-                    console.log('playNote:');
-                    console.log('  Generator:', generatorId);
-                    console.log('  Frequency:', freq, 'Hz');
-                    console.log('  Started at:', now.toFixed(3), 's');
-                    console.log('  Will stop at:', stopTime.toFixed(3), 's');
-                    console.log('  Duration:', finalDuration.toFixed(3), 's');
-                    console.log('  Fade starts at:', fadeStartTime.toFixed(3), 's');
-                    console.log('  Fade ends at:', fadeEndTime.toFixed(3), 's');
+                    debugLog('playNote:');
+                    debugLog('  Generator:', generatorId);
+                    debugLog('  Frequency:', freq, 'Hz');
+                    debugLog('  Started at:', now.toFixed(3), 's');
+                    debugLog('  Will stop at:', stopTime.toFixed(3), 's');
+                    debugLog('  Duration:', finalDuration.toFixed(3), 's');
+                    debugLog('  Fade starts at:', fadeStartTime.toFixed(3), 's');
+                    debugLog('  Fade ends at:', fadeEndTime.toFixed(3), 's');
                     
+                    scheduleHighlightClear();
                     // Particles are already created earlier for slaves (line 1508)
                     // This duplicate creation has been removed to prevent multiple particles per note
                 };
@@ -2504,11 +2544,23 @@
                 
                 // Cache drone particle reference to avoid find() every frame
                 let cachedDroneParticle = null;
+                const TARGET_FPS = 30;
+                let lastFrameTimestamp = 0;
                 
-                const animate = () => {
+                const animate = (timestamp = 0) => {
+                    requestAnimationFrame(animate);
+                    
+                    const shouldRender = isSlave && isPageVisible && (isPlaying.value || particles.length > 0);
+                    if (!shouldRender) {
+                        return;
+                    }
+                    if (timestamp - lastFrameTimestamp < (1000 / TARGET_FPS)) {
+                        return;
+                    }
+                    lastFrameTimestamp = timestamp;
+                    
                     const c = canvas.value; const context = ctx.value;
                     if (!c || !context) {
-                        requestAnimationFrame(animate);
                         return;
                     }
                     // Use actual canvas dimensions, not bounding rect
@@ -2523,13 +2575,6 @@
                     context.fillRect(0, 0, width, height);
                     
                     rotation += 0.008;
-                    
-                    // Only draw animations for slaves - master shows no visuals
-                    if (!isSlave) {
-                        // Master: Just clear the canvas, no animations
-                        requestAnimationFrame(animate);
-                        return;
-                    }
                     
                     // Update cached drone particle reference if needed (only when particles change)
                     if (!cachedDroneParticle || !particles.includes(cachedDroneParticle)) {
@@ -2873,9 +2918,8 @@
                     }
                     
                     // Background interference pattern removed - was causing unwanted dark rotating lines
-                    
-                    requestAnimationFrame(animate);
                 };
+                requestAnimationFrame(animate);
                 
                 const savePreset = () => {
                     const preset = { name: prompt('Preset name:') || 'Untitled', settings: { ...settings }, notes: noteData.map(n => ({ ...n })) };
@@ -7513,6 +7557,12 @@
                     e.stopPropagation();
                     wsError.value = null;
                     
+                    if (!audioUnlocked) {
+                        audioUnlocked = true;
+                        console.log('Audio unlocked flag set by handleTapToStart');
+                    }
+                    audioReady.value = true;
+                    
                     initAudio().then(() => {
                         console.log('Audio initialized in handleTapToStart, state:', audioContext?.state);
                         
@@ -7540,6 +7590,10 @@
                             slaveStatus.value = 'Ready';
                             startDroneNote();
                         }
+                        
+                        // Ensure overlay can hide even if resume took too long
+                        slaveStatus.value = 'Ready';
+                        wsError.value = null;
                     }).catch(e => {
                         console.error('✗ Error initializing audio on tap:', e);
                         slaveStatus.value = 'Ready';
@@ -7658,6 +7712,17 @@
                     ws.value.send(JSON.stringify(presetData));
                 };
                 
+                let qrGenerationTimeout = null;
+                const scheduleQRCodeGeneration = (targetCanvas = null, delay = 200) => {
+                    if (qrGenerationTimeout) {
+                        clearTimeout(qrGenerationTimeout);
+                    }
+                    qrGenerationTimeout = setTimeout(() => {
+                        qrGenerationTimeout = null;
+                        generateQRCode(targetCanvas);
+                    }, delay);
+                };
+                
                 const generateQRCode = (targetCanvas = null) => {
                     // Determine which canvas to use: fullscreen if shown, otherwise regular
                     const canvasToUse = targetCanvas || (showQRCode.value && qrCanvasFullscreen.value ? qrCanvasFullscreen.value : qrCanvas.value);
@@ -7678,7 +7743,7 @@
             // This automatically adapts to domain changes (localhost, Railway, custom domains)
             const qrBaseUrl = window.location.origin;
                     const serverUrl = `${qrBaseUrl}?slave=true`;
-                    console.log('QR Code URL generated:', serverUrl);
+                    debugLog('QR Code URL generated:', serverUrl);
                     
                     // Get container dimensions
                     const container = canvasToUse;
@@ -7694,7 +7759,7 @@
                     }
                     // If existing QR has different URL (domain changed), clear it to regenerate with new domain
                     if (existingQR && existingQR.dataset.qrUrl !== serverUrl) {
-                        console.log('Domain changed, regenerating QR code. Old:', existingQR.dataset.qrUrl, 'New:', serverUrl);
+                        debugLog('Domain changed, regenerating QR code. Old:', existingQR.dataset.qrUrl, 'New:', serverUrl);
                         container.innerHTML = '';
                     }
                     
@@ -7734,9 +7799,11 @@
                     try {
                         if (audioUnlocked) {
                             console.log('Audio already unlocked, skipping');
+                            audioReady.value = true;
                             return;
                         }
                         audioUnlocked = true;
+                        audioReady.value = true;
                         console.log('✓✓✓ Unlocking audio context on first user interaction...', e.type);
                         console.log('Event details:', { type: e.type, target: e.target?.tagName });
                         
@@ -7985,92 +8052,97 @@
                             return keepAliveVideo;
                         };
                         
-                        // For iOS: Very aggressive periodic activity to prevent sleep
-                        // iOS doesn't support Wake Lock API, so we need continuous activity
-                        const iosKeepAliveInterval = setInterval(() => {
-                            if (isPlaying.value) {
-                                // Multiple strategies to keep device awake:
-                                // 1. Canvas activity (triggers repaint) - even if not visible
-                                if (canvas.value) {
-                                    const _ = canvas.value.width;
-                                    const _2 = canvas.value.height;
-                                    // Force repaint by reading context
-                                    if (ctx.value) {
-                                        const _3 = ctx.value.canvas.width;
-                                    }
-                                }
-                                // 2. Request wake lock again (in case it was released)
-                                requestWakeLock();
-                                // 3. Ensure audio context is running (critical for iOS)
-                                if (audioContext) {
-                                    if (audioContext.state === 'suspended') {
-                                        console.log('⚠️ iOS: Audio context suspended, resuming...');
-                                        audioContext.resume().catch(() => {});
-                                    }
-                                    // Touch the audio context to keep it active
-                                    const _ = audioContext.currentTime;
-                                    // Create a tiny buffer to keep context active
-                                    try {
-                                        const buffer = audioContext.createBuffer(1, 1, 22050);
-                                        const source = audioContext.createBufferSource();
-                                        source.buffer = buffer;
-                                        source.connect(audioContext.destination);
-                                        source.start();
-                                        source.stop(audioContext.currentTime + 0.001);
-                                    } catch (e) {
-                                        // Ignore errors
-                                    }
-                                }
-                                // 4. Ensure drone note is running and enhanced for iOS (CRITICAL)
-                                if (!droneOscillator && audioContext && audioContext.state === 'running') {
-                                    console.log('⚠️ iOS: Drone note stopped, restarting...');
-                                    startDroneNote();
-                                    setTimeout(() => enhanceDroneForIOS(), 100);
-                                } else if (droneOscillator && droneGain) {
-                                    // Continuously reinforce drone settings
-                                    enhanceDroneForIOS();
-                                    // Ensure it's still connected
-                                    try {
-                                        const _ = droneOscillator.frequency.value;
-                                        // Slightly modulate frequency to keep it "active"
-                                        droneOscillator.frequency.value = 18 + Math.sin(Date.now() / 1000) * 0.1;
-                                    } catch (e) {
-                                        console.log('⚠️ iOS: Drone oscillator disconnected, restarting...');
-                                        startDroneNote();
-                                    }
-                                }
-                                // 5. Force audio context to stay active by touching masterGain
-                                if (masterGain) {
-                                    const currentGain = masterGain.gain.value;
-                                    masterGain.gain.value = currentGain; // Trigger update
-                                }
-                                // 6. Ensure at least one oscillator is active
-                                if (activeOscillators.size === 0 && audioContext && audioContext.state === 'running') {
-                                    if (!droneOscillator) {
-                                        startDroneNote();
-                                    }
-                                }
-                                // 7. Keep video playing (iOS respects video playback)
-                                if (!keepAliveVideo || keepAliveVideo.paused) {
-                                    createKeepAliveVideo();
-                                    if (keepAliveVideo) {
-                                        keepAliveVideo.play().catch(() => {});
-                                    }
-                                }
-                                // 8. Trigger visibility API to keep page "active"
-                                if (document.visibilityState === 'visible') {
-                                    // Trigger a tiny DOM update
-                                    document.title = document.title === 'Soundflakes' ? 'Soundflakes ' : 'Soundflakes';
+                        let iosKeepAliveInterval = null;
+                        const runIOSKeepAliveTick = () => {
+                            if (!isPlaying.value || !isPageVisible) {
+                                return;
+                            }
+                            // Multiple strategies to keep device awake:
+                            // 1. Canvas activity (triggers repaint) - even if not visible
+                            if (canvas.value) {
+                                const _ = canvas.value.width;
+                                const _2 = canvas.value.height;
+                                if (ctx.value) {
+                                    const _3 = ctx.value.canvas.width;
                                 }
                             }
-                        }, 2000); // Every 2 seconds (extremely aggressive for iOS)
+                            // 2. Request wake lock again (in case it was released)
+                            requestWakeLock();
+                            // 3. Ensure audio context is running (critical for iOS)
+                            if (audioContext) {
+                                if (audioContext.state === 'suspended') {
+                                    console.log('⚠️ iOS: Audio context suspended, resuming...');
+                                    audioContext.resume().catch(() => {});
+                                }
+                                const _ = audioContext.currentTime;
+                                try {
+                                    const buffer = audioContext.createBuffer(1, 1, 22050);
+                                    const source = audioContext.createBufferSource();
+                                    source.buffer = buffer;
+                                    source.connect(audioContext.destination);
+                                    source.start();
+                                    source.stop(audioContext.currentTime + 0.001);
+                                } catch (e) {
+                                    // Ignore errors
+                                }
+                            }
+                            // 4. Ensure drone note is running and enhanced for iOS (CRITICAL)
+                            if (!droneOscillator && audioContext && audioContext.state === 'running') {
+                                console.log('⚠️ iOS: Drone note stopped, restarting...');
+                                startDroneNote();
+                                setTimeout(() => enhanceDroneForIOS(), 100);
+                            } else if (droneOscillator && droneGain) {
+                                enhanceDroneForIOS();
+                                try {
+                                    const _ = droneOscillator.frequency.value;
+                                    droneOscillator.frequency.value = 18 + Math.sin(Date.now() / 1000) * 0.1;
+                                } catch (e) {
+                                    console.log('⚠️ iOS: Drone oscillator disconnected, restarting...');
+                                    startDroneNote();
+                                }
+                            }
+                            // 5. Force audio context to stay active by touching masterGain
+                            if (masterGain) {
+                                const currentGain = masterGain.gain.value;
+                                masterGain.gain.value = currentGain;
+                            }
+                            // 6. Ensure at least one oscillator is active
+                            if (activeOscillators.size === 0 && audioContext && audioContext.state === 'running') {
+                                if (!droneOscillator) {
+                                    startDroneNote();
+                                }
+                            }
+                            // 7. Keep video playing (iOS respects video playback)
+                            if (!keepAliveVideo || keepAliveVideo.paused) {
+                                createKeepAliveVideo();
+                                if (keepAliveVideo) {
+                                    keepAliveVideo.play().catch(() => {});
+                                }
+                            }
+                            // 8. Trigger visibility API to keep page "active"
+                            if (document.visibilityState === 'visible') {
+                                document.title = document.title === 'Soundflakes' ? 'Soundflakes ' : 'Soundflakes';
+                            }
+                        };
+                        
+                        const startIOSKeepAliveLoop = () => {
+                            if (iosKeepAliveInterval || !isIOSDevice || !isSlave) {
+                                return;
+                            }
+                            iosKeepAliveInterval = setInterval(runIOSKeepAliveTick, 2000);
+                        };
+                        
+                        const stopIOSKeepAliveLoop = () => {
+                            if (iosKeepAliveInterval) {
+                                clearInterval(iosKeepAliveInterval);
+                                iosKeepAliveInterval = null;
+                            }
+                        };
                         
                         // Clean up interval and video on unmount
                         onUnmounted(() => {
                             document.removeEventListener('click', handleClickOutside);
-                            if (iosKeepAliveInterval) {
-                                clearInterval(iosKeepAliveInterval);
-                            }
+                            stopIOSKeepAliveLoop();
                             if (keepAliveVideo) {
                                 keepAliveVideo.pause();
                                 keepAliveVideo.remove();
@@ -8206,7 +8278,13 @@
                         
                         // Listen for visibility changes (device wake/sleep)
                         document.addEventListener('visibilitychange', () => {
-                            if (document.visibilityState === 'visible') {
+                            isPageVisible = document.visibilityState === 'visible';
+                            if (!isPageVisible) {
+                                stopIOSKeepAliveLoop();
+                            } else if (isIOSDevice && isSlave && isPlaying.value) {
+                                startIOSKeepAliveLoop();
+                            }
+                            if (isPageVisible) {
                                 console.log('📱 Device woke up - starting auto-resume...');
                                 // Perform comprehensive auto-resume
                                 performAutoResume().catch(e => {
@@ -8252,9 +8330,7 @@
                         // Master-only: Wait for QRCode library to load, then generate QR code
                         const waitForQRCode = () => {
                             if (typeof QRCode !== 'undefined' || typeof window.QRCode !== 'undefined') {
-                                setTimeout(() => {
-                                    generateQRCode();
-                                }, 300);
+                                scheduleQRCodeGeneration(null, 300);
                             } else {
                                 setTimeout(waitForQRCode, 100);
                             }
@@ -8263,23 +8339,14 @@
                         
                         // Regenerate QR code on window resize
                         const resizeHandler = () => {
-                            setTimeout(generateQRCode, 200);
+                            scheduleQRCodeGeneration();
                         };
                         window.addEventListener('resize', resizeHandler);
                         
                         // Watch for controls menu opening to regenerate QR code
                         watch(showControls, (newVal) => {
                             if (newVal) {
-                                // Wait for menu animation to complete, then try multiple times
-                                setTimeout(() => {
-                                    generateQRCode();
-                                }, 100);
-                                setTimeout(() => {
-                                    generateQRCode();
-                                }, 400);
-                                setTimeout(() => {
-                                    generateQRCode();
-                                }, 800);
+                                scheduleQRCodeGeneration();
                             }
                         });
                         
@@ -8288,19 +8355,25 @@
                         watch(showQRCode, (newVal) => {
                             if (newVal) {
                                 qrCodeGenerated = false;
-                                // Wait for fullscreen overlay to render, then generate QR code once
-                                setTimeout(() => {
-                                    if (qrCanvasFullscreen.value && showQRCode.value && !qrCodeGenerated) {
-                                        generateQRCode(qrCanvasFullscreen.value);
-                                        qrCodeGenerated = true;
-                                    }
-                                }, 200);
+                                scheduleQRCodeGeneration(qrCanvasFullscreen.value, 200);
                             } else {
                                 qrCodeGenerated = false;
-                                // Clear QR code when closed
                                 if (qrCanvasFullscreen.value) {
                                     qrCanvasFullscreen.value.innerHTML = '';
                                 }
+                            }
+                        });
+                        
+                        // Watch for iOS keep-alive conditions
+                        watch(isPlaying, (playing) => {
+                            if (!isIOSDevice || !isSlave) {
+                                return;
+                            }
+                            if (playing && isPageVisible) {
+                                startIOSKeepAliveLoop();
+                                runIOSKeepAliveTick();
+                            } else {
+                                stopIOSKeepAliveLoop();
                             }
                         });
                         
@@ -8615,7 +8688,8 @@
                     showSleepPreventionTip, isIOSDevice, openIOSSettings,
                     // Audio state for overlay
                     audioUnlocked: () => audioUnlocked,
-                    audioContext: () => audioContext
+                    audioContext: () => audioContext,
+                    audioReady
                 };
             }
         }).mount('#app');

@@ -6,28 +6,40 @@
 
 1. **File Backup**
    - Location: `backup/` directory
-   - Contains: All HTML, JS, JSON, MD, SH files
-   - VS Code settings (.vscode/)
+   - Multiple timestamped backups available
+   - Latest files preserved
 
 2. **Git Backup**
-   - Commit: "Backup: Working QR code fix deployed to Railway"
-   - Tag: Created with timestamp
-   - All changes committed to git history
+   - All changes committed
+   - Tag created: `backup-intro-improvements`
+   - Tag created: `backup-complete-YYYYMMDD`
+   - Full git history preserved
 
-### Current Status:
-- ✅ QR code fix working
-- ✅ Deployed to Railway
-- ✅ Auto-deploy configured
-- ✅ App live at: https://soundflakes-production.up.railway.app
+3. **Intro Improvements**
+   - 6-second animated intro
+   - Text readability improvements
+   - Particle visualization
+   - All code changes
+
+### Current Features:
+- ✅ 6-second intro animation
+- ✅ Readable text with backdrop blur
+- ✅ Particle visualization
+- ✅ Smooth transitions
+- ✅ Auto-push system working
+- ✅ Volume increase for non-sine sounds
+- ✅ QR code auto-updates
+- ✅ Railway deployment ready
+
+### Backup Locations:
+- **Files:** `/Users/hanshoukes/Desktop/soundmarbles/backup/`
+- **Git:** All commits and tags in repository
+- **GitHub:** All code pushed and backed up
 
 ### To Restore:
-1. **From file backup:** Copy files from `backup/` directory
-2. **From git:** `git checkout backup-YYYYMMDD-HHMMSS`
-
-### Backup Script:
-Run `./create_backup.sh` anytime to create a new backup!
+- **From git:** `git checkout backup-intro-improvements`
+- **From files:** Copy from `backup/` directory
 
 ---
 
 **Everything is safely backed up!** 🎉
-

@@ -2,6 +2,87 @@ const http = require('http');
 const WebSocket = require('ws');
 const fs = require('fs');
 const path = require('path');
+const zlib = require('zlib');
+
+const staticCache = new Map();
+
+function getCachedFile(relativePath) {
+    const fullPath = path.join(__dirname, relativePath);
+    const cached = staticCache.get(fullPath);
+    let stats;
+    try {
+        stats = fs.statSync(fullPath);
+    } catch (err) {
+        if (err.code !== 'ENOENT') {
+            console.error(`Error accessing ${relativePath}:`, err.message);
+        }
+        staticCache.delete(fullPath);
+        return null;
+    }
+
+    if (cached && cached.mtimeMs === stats.mtimeMs && cached.size === stats.size) {
+        return cached;
+    }
+
+    try {
+        const data = fs.readFileSync(fullPath);
+        const gzip = zlib.gzipSync(data);
+        const entry = {
+            data,
+            gzip,
+            size: stats.size,
+            mtimeMs: stats.mtimeMs,
+            etag: `W/"${stats.size}-${stats.mtimeMs}"`,
+            lastModified: stats.mtime.toUTCString()
+        };
+        staticCache.set(fullPath, entry);
+        return entry;
+    } catch (err) {
+        console.error(`Error reading ${relativePath}:`, err.message);
+        staticCache.delete(fullPath);
+        return null;
+    }
+}
+
+function sendCachedFile(req, res, relativePath, {
+    contentType = 'application/octet-stream',
+    cacheControl = 'public, max-age=300',
+    notFoundStatus = 404,
+    notFoundMessage = 'Not found'
+} = {}) {
+    const entry = getCachedFile(relativePath);
+    if (!entry) {
+        res.writeHead(notFoundStatus, { 'Content-Type': 'text/plain' });
+        res.end(notFoundMessage);
+        return false;
+    }
+
+    const headers = {
+        'Content-Type': contentType,
+        'Cache-Control': cacheControl,
+        'ETag': entry.etag,
+        'Last-Modified': entry.lastModified
+    };
+
+    if (req.headers['if-none-match'] && req.headers['if-none-match'] === entry.etag) {
+        res.writeHead(304, headers);
+        res.end();
+        return true;
+    }
+
+    const acceptEncoding = req.headers['accept-encoding'] || '';
+    const supportsGzip = /\bgzip\b/.test(acceptEncoding);
+
+    if (supportsGzip) {
+        headers['Content-Encoding'] = 'gzip';
+        res.writeHead(200, headers);
+        res.end(entry.gzip);
+    } else {
+        res.writeHead(200, headers);
+        res.end(entry.data);
+    }
+    return true;
+}
 
 const PORT = process.env.PORT || 3000;
 
@@ -28,57 +109,41 @@ const server = http.createServer((req, res) => {
     
     // Serve index.html for root path or /index.html (with or without query strings)
     if (pathname === '/' || pathname === '/index.html') {
-        fs.readFile(path.join(__dirname, 'index.html'), (err, data) => {
-            if (err) {
-                res.writeHead(500);
-                res.end('Error loading index.html');
-            } else {
-                // Add cache-busting headers to prevent browser caching
-                res.writeHead(200, { 
-                    'Content-Type': 'text/html',
-                    'Cache-Control': 'no-cache, no-store, must-revalidate',
-                    'Pragma': 'no-cache',
-                    'Expires': '0'
-                });
-                res.end(data);
-            }
+        const served = sendCachedFile(req, res, 'index.html', {
+            contentType: 'text/html',
+            cacheControl: 'no-cache, no-store, must-revalidate',
+            notFoundStatus: 500,
+            notFoundMessage: 'Error loading index.html'
         });
+        if (!served) {
+            return;
+        }
     } else if (pathname === '/test-websocket.html') {
-        // Serve test file if it exists
-        fs.readFile(path.join(__dirname, 'test-websocket.html'), (err, data) => {
-            if (err) {
-                res.writeHead(404);
-                res.end('Test file not found');
-            } else {
-                res.writeHead(200, { 'Content-Type': 'text/html' });
-                res.end(data);
-            }
+        sendCachedFile(req, res, 'test-websocket.html', {
+            contentType: 'text/html',
+            cacheControl: 'public, max-age=60',
+            notFoundStatus: 404,
+            notFoundMessage: 'Test file not found'
         });
     } else if (pathname === '/logo.jpg' || pathname === '/logo.jpeg') {
-        // Serve logo file
         const logoPath = pathname === '/logo.jpg' ? 'logo.jpg' : 'logo.jpeg';
-        fs.readFile(path.join(__dirname, logoPath), (err, data) => {
-            if (err) {
-                res.writeHead(404);
-                res.end('Logo not found');
-            } else {
-                res.writeHead(200, { 'Content-Type': 'image/jpeg' });
-                res.end(data);
-            }
+        sendCachedFile(req, res, logoPath, {
+            contentType: 'image/jpeg',
+            cacheControl: 'public, max-age=604800',
+            notFoundStatus: 404,
+            notFoundMessage: 'Logo not found'
         });
     } else if (pathname === '/favicon.ico') {
-        // Handle favicon requests - serve logo.jpg as favicon or return 204 (No Content)
-        const logoPath = path.join(__dirname, 'logo.jpg');
-        fs.readFile(logoPath, (err, data) => {
-            if (err) {
-                // Return 204 No Content instead of 404 for favicon to prevent browser errors
-                res.writeHead(204);
-                res.end();
-            } else {
-                res.writeHead(200, { 'Content-Type': 'image/jpeg' });
-                res.end(data);
-            }
+        const served = sendCachedFile(req, res, 'logo.jpg', {
+            contentType: 'image/jpeg',
+            cacheControl: 'public, max-age=86400',
+            notFoundStatus: 204,
+            notFoundMessage: ''
         });
+        if (!served) {
+            res.writeHead(204);
+            res.end();
+        }
     } else if (pathname === '/service-worker.js' || pathname === '/sw.js') {
         // Handle service worker requests - return 204 (No Content) to prevent 404 errors
         res.writeHead(204);
@@ -205,11 +270,14 @@ wss.on('connection', (ws, req) => {
                 masterConnection = ws;
                 console.log('Master connected');
                 
-                // Send current slave list to master
+                // Send current slave list (with names) to master
                 ws.send(JSON.stringify({
                     type: 'slaves',
                     count: slaves.length,
-                    slaves: slaves.map(s => s.id)
+                    slaves: slaves.map((s, index) => ({
+                        id: s.id,
+                        name: s.name || String(index + 1)
+                    }))
                 }));
             } else if (data.type === 'slave') {
                 // Slave device connected
@@ -219,8 +287,10 @@ wss.on('connection', (ws, req) => {
                 // Remove any existing connection with same ID
                 slaves = slaves.filter(s => s.id !== slaveId && s.ws !== ws);
                 
-                slaves.push({ id: slaveId, ws, connected: true, volume: 100 }); // Default volume 100%
-                const slaveIndex = slaves.length; // Slave number (1-based)
+                const slaveNumber = slaves.length + 1; // We haven't pushed the new slave yet
+                const slaveName = String(slaveNumber);
+                slaves.push({ id: slaveId, ws, connected: true, volume: 100, name: slaveName }); // Default volume 100%
+                const slaveIndex = slaveNumber; // Slave number (1-based)
                 console.log(`✓ Slave registered successfully: ${slaveId} (Total: ${slaves.length}, Number: ${slaveIndex})`);
                 
                 // Send welcome message to slave immediately
@@ -228,7 +298,7 @@ wss.on('connection', (ws, req) => {
                     ws.send(JSON.stringify({
                         type: 'welcome',
                         slaveId,
-                        slaveName: String(slaveIndex), // Send slave number as name
+                        slaveName, // Send slave number as name
                         totalSlaves: slaves.length
                     }));
                     console.log(`Welcome message sent to slave ${slaveId} with name: ${slaveIndex}`);
@@ -239,10 +309,12 @@ wss.on('connection', (ws, req) => {
                 // Notify master of new slave
                 if (masterConnection && masterConnection.readyState === WebSocket.OPEN) {
                     try {
+                        const registeredSlave = slaves.find(s => s.id === slaveId);
+                        const displayName = registeredSlave?.name || slaveName;
                         masterConnection.send(JSON.stringify({
                             type: 'slave_connected',
                             slaveId,
-                            slaveName: String(slaveIndex), // Send slave number as name
+                            slaveName: displayName, // Send slave number as name
                             totalSlaves: slaves.length
                         }));
                         console.log(`Master notified of slave ${slaveId} (name: ${slaveIndex})`);
